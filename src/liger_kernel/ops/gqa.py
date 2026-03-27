@@ -1,8 +1,9 @@
 """
-Grouped Query Attention (GQA) Triton Kernel — FlashAttention-2 style.
+Grouped Query Attention (GQA) kernel.
 
-Fused implementation that never materializes the full [B, H, S, S] attention matrix.
-Memory: O(B * H_q * S * D + B * H_q * S) instead of O(B * H_q * S^2).
+The forward path uses a Triton kernel in a FlashAttention-2 style to avoid
+materializing the full [B, H, S, S] attention matrix. The backward path
+currently prioritizes correctness and reuses a PyTorch reference recomputation.
 
 References:
 - GQA: https://arxiv.org/abs/2305.13245
@@ -151,7 +152,11 @@ def _gqa_fwd_kernel(
     tl.store(lse_ptrs, m_i + tl.log(l_i), mask=m_offs < seq_len)
 
 
-# ───────────────────────────── Backward dQ ──────────────────────────
+# ───────────────────── Experimental Triton backward kernels ─────────────────────
+#
+# These kernels are kept for future optimization work, but the production
+# backward path currently uses a PyTorch reference recomputation in
+# `gqa_backward` to guarantee exact gradient parity with the reference tests.
 
 
 @triton.jit
@@ -199,7 +204,7 @@ def _gqa_bwd_dq_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    """Compute dQ by recomputing attention on-the-fly and iterating over KV blocks."""
+    """Experimental Triton kernel for dQ."""
     pid_bh = tl.program_id(0)
     pid_m = tl.program_id(1)
 
@@ -346,7 +351,7 @@ def _gqa_bwd_dkv_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
-    """Compute dK, dV by iterating over all Q heads in the group and Q blocks."""
+    """Experimental Triton kernel for dK and dV."""
     pid_bkv = tl.program_id(0)
     pid_n = tl.program_id(1)
 
@@ -547,7 +552,7 @@ def gqa_backward(
     is_causal: bool,
 ) -> tuple:
     """
-    Fused GQA backward pass — recomputes attention on-the-fly.
+    GQA backward pass.
 
     Args:
         grad_output: [batch_size, num_q_heads, seq_len, head_dim]
@@ -567,8 +572,9 @@ def gqa_backward(
     grad_output = grad_output.contiguous()
 
     # Correctness-first backward: recompute the reference GQA graph in PyTorch and
-    # use autograd to obtain exact q/k/v gradients. The Triton backward kernels are
-    # kept in this file for future optimization work once they match the reference.
+    # use autograd to obtain exact q/k/v gradients. This matches the project style
+    # used in other kernels where the custom autograd surface is kept stable even
+    # when some sub-steps still rely on PyTorch operators.
     with torch.enable_grad():
         query_ref = query.detach().requires_grad_(True)
         key_ref = key.detach().requires_grad_(True)
