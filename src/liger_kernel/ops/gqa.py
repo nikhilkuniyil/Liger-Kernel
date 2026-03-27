@@ -411,8 +411,8 @@ def _gqa_bwd_dkv_kernel(
                 s = tl.where(m_offs[:, None] >= n_offs[None, :], s, float("-inf"))
             p = tl.exp(s - lse[:, None])
 
-            # dV += P^T @ dO
-            dv_acc += tl.dot(tl.trans(p.to(do.dtype)), do)
+            # dV += P^T @ dO  (keep p in fp32 to avoid bf16 precision loss)
+            dv_acc += tl.dot(tl.trans(p), do.to(tl.float32))
 
             # dP = dO @ V^T,  dS = P * (dP - D)
             dp = tl.dot(do, tl.trans(v))
