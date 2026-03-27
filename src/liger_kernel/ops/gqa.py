@@ -242,6 +242,8 @@ def _gqa_bwd_dq_kernel(
         other=0.0,
     )
 
+    q_f32 = q.to(tl.float32)
+    do_f32 = do.to(tl.float32)
     dq_acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
 
     k_base = K + batch_id * stride_kb + kv_head_id * stride_kh
@@ -262,20 +264,22 @@ def _gqa_bwd_dq_kernel(
             mask=nd_mask,
             other=0.0,
         )
+        k_f32 = k.to(tl.float32)
+        v_f32 = v.to(tl.float32)
 
         # Recompute attention weights
-        s = tl.dot(q, tl.trans(k)) * scale
+        s = tl.dot(q_f32, tl.trans(k_f32)) * scale
         s = tl.where(n_offs[None, :] < seq_len, s, float("-inf"))
         if is_causal:
             s = tl.where(m_offs[:, None] >= n_offs[None, :], s, float("-inf"))
         p = tl.exp(s - lse[:, None])
 
         # dP = dO @ V^T,  dS = P * (dP - D)
-        dp = tl.dot(do, tl.trans(v))
+        dp = tl.dot(do_f32, tl.trans(v_f32))
         ds = p * (dp - di[:, None])
 
         # dQ += dS @ K
-        dq_acc += tl.dot(ds.to(k.dtype), k)
+        dq_acc += tl.dot(ds, k_f32)
 
     dq_acc *= scale
 
@@ -395,6 +399,8 @@ def _gqa_bwd_dkv_kernel(
                 mask=md_mask_q,
                 other=0.0,
             )
+            q_f32 = q.to(tl.float32)
+            do_f32 = do.to(tl.float32)
             lse = tl.load(
                 lse_base + m_offs * stride_lses, mask=m_offs < seq_len, other=0.0
             )
@@ -405,21 +411,21 @@ def _gqa_bwd_dkv_kernel(
             )
 
             # Recompute attention: P = exp(Q @ K^T * scale - LSE)
-            s = tl.dot(q, tl.trans(k)) * scale
+            s = tl.dot(q_f32, tl.trans(k.to(tl.float32))) * scale
             s = tl.where(n_offs[None, :] < seq_len, s, float("-inf"))
             if is_causal:
                 s = tl.where(m_offs[:, None] >= n_offs[None, :], s, float("-inf"))
             p = tl.exp(s - lse[:, None])
 
             # dV += P^T @ dO  (keep p in fp32 to avoid bf16 precision loss)
-            dv_acc += tl.dot(tl.trans(p), do.to(tl.float32))
+            dv_acc += tl.dot(tl.trans(p), do_f32)
 
             # dP = dO @ V^T,  dS = P * (dP - D)
-            dp = tl.dot(do, tl.trans(v))
+            dp = tl.dot(do_f32, tl.trans(v.to(tl.float32)))
             ds = p * (dp - di[:, None])
 
             # dK += dS^T @ Q
-            dk_acc += tl.dot(tl.trans(ds.to(q.dtype)), q)
+            dk_acc += tl.dot(tl.trans(ds), q_f32)
 
     dk_acc *= scale
 
