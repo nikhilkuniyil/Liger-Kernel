@@ -1,7 +1,11 @@
+import inspect
+import math
+
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 
 from liger_kernel.ops import LigerCrossEntropyFunction
 from liger_kernel.ops import LigerDyTFunction
@@ -10,6 +14,7 @@ from liger_kernel.ops import LigerFusedLinearCrossEntropyFunction
 from liger_kernel.ops import LigerFusedLinearJSDFunction
 from liger_kernel.ops import LigerFusedNeighborhoodAttentionFunction
 from liger_kernel.ops import LigerGELUMulFunction
+from liger_kernel.ops import LigerGQAFunction
 from liger_kernel.ops import LigerGroupNormFunction
 from liger_kernel.ops import LigerJSDFunction
 from liger_kernel.ops import LigerKLDivLossFunction
@@ -247,6 +252,96 @@ def liger_fused_neighborhood_attention(
         Output tensor of shape [batch_size, num_heads, seq_len, head_dim]
     """
     return LigerFusedNeighborhoodAttentionFunction.apply(query, key, value, kernel_size, dilation, scale)
+
+
+def liger_gqa(
+    query,
+    key,
+    value,
+    scale: float = None,
+    is_causal: bool = False,
+    backend: str = "auto",
+):
+    """
+    Liger Grouped Query Attention (GQA).
+
+    GQA is an attention mechanism where multiple query heads share the same
+    key/value heads, reducing memory bandwidth while maintaining quality.
+
+    Reference: https://arxiv.org/abs/2305.13245
+
+    Args:
+        query: Query tensor of shape [batch_size, num_q_heads, seq_len, head_dim]
+        key: Key tensor of shape [batch_size, num_kv_heads, seq_len, head_dim]
+        value: Value tensor of shape [batch_size, num_kv_heads, seq_len, head_dim]
+        scale: Scaling factor for attention scores (default: 1/sqrt(head_dim))
+        is_causal: Whether to apply causal masking (default: False)
+        backend: Attention backend to use:
+            - "auto": prefer SDPA, fallback to Triton op if unavailable
+            - "sdpa": force torch scaled_dot_product_attention path
+            - "triton": force Liger Triton GQA op path
+
+    Returns:
+        Output tensor of shape [batch_size, num_q_heads, seq_len, head_dim]
+
+    Note:
+        num_q_heads must be divisible by num_kv_heads.
+        The group size is num_q_heads // num_kv_heads.
+    """
+    if backend not in {"auto", "sdpa", "triton"}:
+        raise ValueError(f"backend must be one of ['auto', 'sdpa', 'triton'], got '{backend}'")
+
+    batch_size, num_q_heads, seq_len, head_dim = query.shape
+    _, num_kv_heads, _, _ = key.shape
+
+    if num_q_heads % num_kv_heads != 0:
+        raise ValueError(
+            f"num_q_heads ({num_q_heads}) must be divisible by num_kv_heads ({num_kv_heads})"
+        )
+
+    query = query.contiguous()
+    key = key.contiguous()
+    value = value.contiguous()
+
+    if scale is None:
+        scale = 1.0 / math.sqrt(head_dim)
+
+    if backend == "triton":
+        return LigerGQAFunction.apply(query, key, value, scale, is_causal)
+
+    if not hasattr(F, "scaled_dot_product_attention"):
+        if backend == "sdpa":
+            raise RuntimeError("scaled_dot_product_attention is not available in this PyTorch version")
+        return LigerGQAFunction.apply(query, key, value, scale, is_causal)
+
+    sig = inspect.signature(F.scaled_dot_product_attention)
+    supports_scale = "scale" in sig.parameters
+    supports_enable_gqa = "enable_gqa" in sig.parameters
+
+    # Older PyTorch versions may not expose `scale`; emulate it by pre-scaling Q.
+    if supports_scale:
+        query_for_sdpa = query
+        scale_kwarg = scale
+    else:
+        query_for_sdpa = query * (scale * math.sqrt(head_dim))
+        scale_kwarg = None
+
+    kwargs = {
+        "attn_mask": None,
+        "dropout_p": 0.0,
+        "is_causal": is_causal,
+    }
+    if supports_scale:
+        kwargs["scale"] = scale_kwarg
+
+    if num_q_heads != num_kv_heads and not supports_enable_gqa:
+        group_size = num_q_heads // num_kv_heads
+        key = key.repeat_interleave(group_size, dim=1)
+        value = value.repeat_interleave(group_size, dim=1)
+    elif supports_enable_gqa:
+        kwargs["enable_gqa"] = num_q_heads != num_kv_heads
+
+    return F.scaled_dot_product_attention(query_for_sdpa, key, value, **kwargs)
 
 
 def liger_tvd(
