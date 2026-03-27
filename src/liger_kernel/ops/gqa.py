@@ -481,10 +481,11 @@ def gqa_forward(
         batch_size, num_q_heads, seq_len, device=query.device, dtype=torch.float32
     )
 
-    BLOCK_M = max(16, min(64, triton.next_power_of_2(seq_len)))
-    BLOCK_N = max(16, min(64, triton.next_power_of_2(seq_len)))
+    max_block = 64 if head_dim <= 64 else 32
+    BLOCK_M = max(16, min(max_block, triton.next_power_of_2(seq_len)))
+    BLOCK_N = max(16, min(max_block, triton.next_power_of_2(seq_len)))
     BLOCK_D = max(16, triton.next_power_of_2(head_dim))
-    num_warps = 4 if head_dim <= 64 else 8
+    num_warps = 4
 
     grid = (batch_size * num_q_heads, triton.cdiv(seq_len, BLOCK_M))
 
@@ -566,10 +567,11 @@ def gqa_backward(
     grad_key = torch.empty_like(key)
     grad_value = torch.empty_like(value)
 
-    BLOCK_M = max(16, min(64, triton.next_power_of_2(seq_len)))
-    BLOCK_N = max(16, min(64, triton.next_power_of_2(seq_len)))
+    max_block = 64 if head_dim <= 64 else 32
+    BLOCK_M = max(16, min(max_block, triton.next_power_of_2(seq_len)))
+    BLOCK_N = max(16, min(max_block, triton.next_power_of_2(seq_len)))
     BLOCK_D = max(16, triton.next_power_of_2(head_dim))
-    num_warps = 4 if head_dim <= 64 else 8
+    num_warps = 4
 
     # dQ kernel: grid over (batch * q_heads, q_blocks)
     grid_dq = (batch_size * num_q_heads, triton.cdiv(seq_len, BLOCK_M))

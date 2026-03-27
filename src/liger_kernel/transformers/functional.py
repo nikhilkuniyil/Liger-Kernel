@@ -314,9 +314,14 @@ def liger_gqa(
             raise RuntimeError("scaled_dot_product_attention is not available in this PyTorch version")
         return LigerGQAFunction.apply(query, key, value, scale, is_causal)
 
-    sig = inspect.signature(F.scaled_dot_product_attention)
-    supports_scale = "scale" in sig.parameters
-    supports_enable_gqa = "enable_gqa" in sig.parameters
+    try:
+        sig = inspect.signature(F.scaled_dot_product_attention)
+        supports_scale = "scale" in sig.parameters
+        supports_enable_gqa = "enable_gqa" in sig.parameters
+    except (ValueError, TypeError):
+        # Some PyTorch builds don't expose a signature for this builtin
+        supports_scale = False
+        supports_enable_gqa = False
 
     # Older PyTorch versions may not expose `scale`; emulate it by pre-scaling Q.
     if supports_scale:
