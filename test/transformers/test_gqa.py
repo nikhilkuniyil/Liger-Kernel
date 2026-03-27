@@ -216,6 +216,7 @@ def test_gqa_correctness(
         num_kv_heads=num_kv_heads,
         bias=bias,
         is_causal=is_causal,
+        backend="triton",
     ).to(device).to(dtype)
 
     # Copy weights
@@ -558,6 +559,7 @@ def test_gqa_layer_correctness(
         num_q_heads=num_q_heads,
         num_kv_heads=num_kv_heads,
         bias=bias,
+        backend="triton",
     ).to(device).to(dtype)
 
     # Copy weights
